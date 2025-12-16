@@ -1,6 +1,5 @@
 
 import { GoogleGenAI, Chat, FunctionDeclaration, Type, Tool, FunctionCall } from "@google/genai";
-import { getWeather } from "./weatherService";
 
 // Initialize Gemini Client
 const ai = new GoogleGenAI({ apiKey: process.env.NEXT_PUBLIC_GEMINI_API_KEY });

@@ -2,14 +2,17 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, CloudSun, Loader2 } from 'lucide-react';
-import { Message, WeatherData } from '@/lib/types';
+
+import type { Message, WeatherData } from '@/lib/types';
 import { sendUserMessage, sendToolResponse } from '@/lib/geminiService';
 import { getWeather } from '@/lib/weatherService';
 import ChatMessage from '../components/ChatMessage';
 
+/** Safe unique ID generator */
 const generateId = () => crypto.randomUUID();
 
 const ChatInterface: React.FC = () => {
+  /** CHAT STATE */
   const [messages, setMessages] = useState<Message[]>([
     {
       id: generateId(),
@@ -26,27 +29,26 @@ const ChatInterface: React.FC = () => {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const scrollToBottom = () => {
+  /** AUTO SCROLL */
+  useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
+  }, [messages, isStreaming]);
 
-  useEffect(scrollToBottom, [messages, isStreaming]);
-
-  /** STREAM UPDATE HANDLER */
+  /** STREAM TEXT HANDLER */
   const handleStreamUpdate = (
     chunkText: string,
     done: boolean,
     messageId: string
   ) => {
     setMessages(prev =>
-      prev.map(m =>
-        m.id === messageId
+      prev.map(msg =>
+        msg.id === messageId
           ? {
-              ...m,
-              content: m.content + chunkText,
+              ...msg,
+              content: msg.content + chunkText,
               isStreaming: !done,
             }
-          : m
+          : msg
       )
     );
 
@@ -68,6 +70,7 @@ const ChatInterface: React.FC = () => {
     setInput('');
     setIsStreaming(true);
 
+    /** Placeholder AI message for streaming */
     const aiMessageId = generateId();
 
     setMessages(prev => [
@@ -83,49 +86,54 @@ const ChatInterface: React.FC = () => {
 
     await sendUserMessage(
       userMessage.content,
+
+      /** STREAM CALLBACK */
       (text, done) => handleStreamUpdate(text, done, aiMessageId),
 
       /** TOOL CALL DETECTED */
       toolCall => {
-        // Remove empty streaming message
+        // Remove empty streaming placeholder
         setMessages(prev => prev.filter(m => m.id !== aiMessageId));
 
         setIsStreaming(false);
         setIsWaitingForToolConfirm(true);
 
         const location =
-          (toolCall.args as any)?.location || 'the requested location';
+  typeof toolCall.args === 'object' && toolCall.args !== null
+    ? (toolCall.args as any).location ?? 'the requested location'
+    : 'the requested location';
 
-        setMessages(prev => [
-          ...prev,
-          {
-            id: generateId(),
-            role: 'model',
-            content: `Do you want me to show the weather data for **${location}**?`,
-            timestamp: new Date(),
-            isToolConfirmation: true,
-            toolCallRequest: {
-              id: toolCall.id || '',
-              name: toolCall.name || '',
-              args: toolCall.args,
-            },
+
+        const confirmationMessage: Message = {
+          id: generateId(),
+          role: 'model',
+          content: `Do you want me to show the weather data for **${location}**?`,
+          timestamp: new Date(),
+          isToolConfirmation: true,
+          toolCallRequest: {
+            id: toolCall.id || '',
+            name: toolCall.name || '',
+            args: toolCall.args,
           },
-        ]);
+        };
+
+        setMessages(prev => [...prev, confirmationMessage]);
       }
     );
   };
 
-  /** CONFIRM TOOL */
+  /** CONFIRM TOOL EXECUTION */
   const handleConfirmTool = async (messageId: string) => {
     const msg = messages.find(m => m.id === messageId);
     if (!msg?.toolCallRequest) return;
 
     const { id, name, args } = msg.toolCallRequest;
-    const location = args?.location || '';
+    const location = args?.location ?? '';
 
     setIsWaitingForToolConfirm(false);
     setIsStreaming(true);
 
+    /** Update confirmation message */
     setMessages(prev =>
       prev.map(m =>
         m.id === messageId
@@ -142,12 +150,13 @@ const ChatInterface: React.FC = () => {
 
     try {
       weatherData = await getWeather(location);
-    } catch (err) {
-      console.error('Weather API failed:', err);
+    } catch (error) {
+      console.error('Weather fetch failed:', error);
     }
 
     const finalMessageId = generateId();
 
+    /** Final AI message (with optional weather card) */
     setMessages(prev => [
       ...prev,
       {
@@ -163,8 +172,13 @@ const ChatInterface: React.FC = () => {
     await sendToolResponse(
       id,
       name,
-      weatherData ? { weather: weatherData } : { error: 'Weather fetch failed' },
-      (text, done) => handleStreamUpdate(text, done, finalMessageId),
+      weatherData
+        ? { weather: weatherData }
+        : { error: 'Unable to fetch weather data' },
+
+      (text, done) =>
+        handleStreamUpdate(text, done, finalMessageId),
+
       () => setIsStreaming(false)
     );
   };
@@ -208,12 +222,14 @@ const ChatInterface: React.FC = () => {
       id,
       name,
       { error: 'User cancelled the request' },
-      (text, done) => handleStreamUpdate(text, done, cancelMessageId),
+      (text, done) =>
+        handleStreamUpdate(text, done, cancelMessageId),
       () => setIsStreaming(false)
     );
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
+  /** ENTER KEY HANDLER */
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
@@ -221,11 +237,11 @@ const ChatInterface: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col h-[600px] w-full max-w-2xl bg-white/60 backdrop-blur-xl rounded-2xl shadow-2xl border border-white/50 overflow-hidden">
+    <div className="flex flex-col h-[600px] w-full max-w-2xl bg-white/60 backdrop-blur-xl rounded-2xl shadow-2xl border overflow-hidden">
 
       {/* HEADER */}
-      <div className="bg-white/80 p-4 flex items-center border-b">
-        <div className="w-10 h-10 bg-gradient-to-br from-sky-400 to-blue-600 rounded-xl flex items-center justify-center mr-3">
+      <div className="p-4 bg-white/80 border-b flex items-center gap-3">
+        <div className="w-10 h-10 bg-gradient-to-br from-sky-400 to-blue-600 rounded-xl flex items-center justify-center">
           <CloudSun className="text-white w-6 h-6" />
         </div>
         <div>
@@ -259,7 +275,7 @@ const ChatInterface: React.FC = () => {
       </div>
 
       {/* INPUT */}
-      <div className="p-4 border-t bg-white/80">
+      <div className="p-4 bg-white/80 border-t">
         <div className="relative flex items-center">
           <input
             value={input}

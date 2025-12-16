@@ -1,13 +1,18 @@
+// lib/types.ts
 
 export interface Message {
   id: string;
   role: 'user' | 'model';
   content: string;
   timestamp: Date;
+
+  // Streaming support
   isStreaming?: boolean;
-  weatherData?: WeatherData; // Optional attachment if the message contains weather info
-  
-  // For Manual Tool Confirmation Flow
+
+  // Weather card attachment
+  weatherData?: WeatherData;
+
+  // Tool confirmation flow
   isToolConfirmation?: boolean;
   toolCallRequest?: ToolCallRequest;
 }
@@ -15,7 +20,10 @@ export interface Message {
 export interface ToolCallRequest {
   id: string;
   name: string;
-  args: any;
+  args?: {
+    location?: string;
+    [key: string]: any;
+  };
 }
 
 export interface WeatherData {
@@ -39,7 +47,12 @@ export interface WeatherData {
   };
 }
 
+/**
+ * Centralized chat state (optional usage)
+ * Matches the new ChatInterface logic
+ */
 export interface ChatState {
   messages: Message[];
-  isLoading: boolean;
+  isStreaming: boolean;
+  isWaitingForToolConfirm: boolean;
 }

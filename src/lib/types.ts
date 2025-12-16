@@ -1,3 +1,4 @@
+
 export interface Message {
   id: string;
   role: 'user' | 'model';
@@ -5,6 +6,16 @@ export interface Message {
   timestamp: Date;
   isStreaming?: boolean;
   weatherData?: WeatherData; // Optional attachment if the message contains weather info
+  
+  // For Manual Tool Confirmation Flow
+  isToolConfirmation?: boolean;
+  toolCallRequest?: ToolCallRequest;
+}
+
+export interface ToolCallRequest {
+  id: string;
+  name: string;
+  args: any;
 }
 
 export interface WeatherData {

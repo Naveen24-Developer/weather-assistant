@@ -1,10 +1,10 @@
-'use client';
 
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, CloudSun, Loader2 } from 'lucide-react';
 import { Message, WeatherData } from '@/lib/types';
-import { sendMessageToGemini } from '@/lib/geminiService';
-import ChatMessage from './ChatMessage';
+import { sendUserMessage, sendToolResponse } from '@/lib/geminiService';
+import { getWeather } from '@/lib/weatherService';
+import ChatMessage from '../components/ChatMessage';
 
 const ChatInterface: React.FC = () => {
   const [messages, setMessages] = useState<Message[]>([
@@ -27,6 +27,29 @@ const ChatInterface: React.FC = () => {
     scrollToBottom();
   }, [messages]);
 
+  // Helper to append text to the latest message or create a new one
+  const handleStreamUpdate = (chunkText: string, done: boolean, messageId: string) => {
+     setMessages((prev) => {
+          const newMessages = [...prev];
+          const msgIndex = newMessages.findIndex((m) => m.id === messageId);
+          
+          if (msgIndex !== -1) {
+             const updatedMsg = { ...newMessages[msgIndex] };
+             updatedMsg.content = updatedMsg.content + chunkText;
+             
+             if (done) {
+               updatedMsg.isStreaming = false;
+             }
+             newMessages[msgIndex] = updatedMsg;
+          }
+          return newMessages;
+     });
+     
+     if (done) {
+         setIsLoading(false);
+     }
+  };
+
   const handleSend = async () => {
     if (!input.trim() || isLoading) return;
 
@@ -41,52 +64,129 @@ const ChatInterface: React.FC = () => {
     setInput('');
     setIsLoading(true);
 
-    // Placeholder for AI message
+    // Create placeholder for initial AI response
     const aiMessageId = (Date.now() + 1).toString();
     const aiMessagePlaceholder: Message = {
       id: aiMessageId,
       role: 'model',
-      content: '', // Will be filled by stream
+      content: '', 
       timestamp: new Date(),
       isStreaming: true,
     };
-
     setMessages((prev) => [...prev, aiMessagePlaceholder]);
 
-    let weatherDataBuffer: WeatherData | undefined = undefined;
-
-    await sendMessageToGemini(
+    await sendUserMessage(
       userMessage.content,
-      (chunkText, done) => {
-        setMessages((prev) => {
-          const newMessages = [...prev];
-          const msgIndex = newMessages.findIndex((m) => m.id === aiMessageId);
-          if (msgIndex !== -1) {
-             const updatedMsg = { ...newMessages[msgIndex] };
-             updatedMsg.content = updatedMsg.content + chunkText;
-             
-             // If we have buffered weather data and it's not attached yet, attach it
-             if (weatherDataBuffer && !updatedMsg.weatherData) {
-                 updatedMsg.weatherData = weatherDataBuffer;
-             }
-
-             if (done) {
-               updatedMsg.isStreaming = false;
-             }
-             newMessages[msgIndex] = updatedMsg;
-          }
-          return newMessages;
-        });
-        
-        if (done) {
-            setIsLoading(false);
-        }
-      },
-      (data) => {
-          // Callback when weather data is fetched
-          weatherDataBuffer = data;
+      (text, done) => handleStreamUpdate(text, done, aiMessageId),
+      (toolCall) => {
+          // STOP! Tool call detected.
+          // Create a "Confirmation" message.
+          setIsLoading(false); // Stop loading spinner so user can interact
+          
+          const location = (toolCall.args as any)?.location || "the requested location";
+          
+          const confirmationMessage: Message = {
+              id: (Date.now() + 2).toString(),
+              role: 'model',
+              content: `Do you want me to show the weather data for ${location}?`,
+              timestamp: new Date(),
+              isToolConfirmation: true,
+              toolCallRequest: {
+                  id: toolCall.id || '',
+                  name: toolCall.name || '',
+                  args: toolCall.args
+              }
+          };
+          
+          setMessages(prev => [...prev, confirmationMessage]);
       }
     );
+  };
+
+  const handleConfirmTool = async (messageId: string) => {
+      // Find the message with the tool request
+      const msg = messages.find(m => m.id === messageId);
+      if (!msg || !msg.toolCallRequest) return;
+
+      const { id, name, args } = msg.toolCallRequest;
+      const location = args?.location || "";
+
+      // 1. Update UI: Remove buttons from the confirmation message
+      setMessages(prev => prev.map(m => 
+          m.id === messageId 
+          ? { ...m, isToolConfirmation: false, content: `Checking weather for ${location}...` } 
+          : m
+      ));
+
+      setIsLoading(true);
+
+      // 2. Fetch Weather
+      const weatherData = await getWeather(location);
+      
+      const toolResult = weatherData 
+        ? { weather: weatherData } 
+        : { error: "Could not fetch weather. Please try again." };
+
+      // 3. Create a NEW message for the final answer
+      const finalAnswerId = (Date.now() + 10).toString();
+      const finalMessage: Message = {
+          id: finalAnswerId,
+          role: 'model',
+          content: '',
+          timestamp: new Date(),
+          isStreaming: true,
+          weatherData: weatherData || undefined // Attach card immediately if we have it
+      };
+      setMessages(prev => [...prev, finalMessage]);
+
+      // 4. Send Tool Response to Gemini and stream the rest
+      await sendToolResponse(
+          id,
+          name,
+          toolResult,
+          (text, done) => handleStreamUpdate(text, done, finalAnswerId),
+          (nextToolCall) => {
+               // Handle nested tool calls if necessary (unlikely for this simple app, but good to have safety)
+               console.warn("Nested tool calls not fully implemented in this demo", nextToolCall);
+               setIsLoading(false);
+          }
+      );
+  };
+
+  const handleCancelTool = async (messageId: string) => {
+      const msg = messages.find(m => m.id === messageId);
+      if (!msg || !msg.toolCallRequest) return;
+
+      const { id, name } = msg.toolCallRequest;
+
+      // 1. Update UI
+      setMessages(prev => prev.map(m => 
+          m.id === messageId 
+          ? { ...m, isToolConfirmation: false, content: "❌ Request cancelled." } 
+          : m
+      ));
+
+      setIsLoading(true);
+
+      // 2. Create response message
+      const cancelResponseId = (Date.now() + 20).toString();
+       const cancelMessage: Message = {
+          id: cancelResponseId,
+          role: 'model',
+          content: '',
+          timestamp: new Date(),
+          isStreaming: true,
+      };
+      setMessages(prev => [...prev, cancelMessage]);
+
+      // 3. Send "User cancelled" to Gemini
+      await sendToolResponse(
+          id,
+          name,
+          { error: "User cancelled the request." },
+          (text, done) => handleStreamUpdate(text, done, cancelResponseId),
+          () => setIsLoading(false)
+      );
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -116,7 +216,12 @@ const ChatInterface: React.FC = () => {
       {/* Messages Area */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-hide bg-gradient-to-b from-transparent to-white/30">
         {messages.map((msg) => (
-          <ChatMessage key={msg.id} message={msg} />
+          <ChatMessage 
+            key={msg.id} 
+            message={msg} 
+            onConfirmTool={handleConfirmTool}
+            onCancelTool={handleCancelTool}
+          />
         ))}
         {isLoading && messages[messages.length - 1]?.role !== 'model' && (
              <div className="flex justify-start">

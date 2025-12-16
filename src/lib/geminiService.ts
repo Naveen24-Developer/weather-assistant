@@ -1,8 +1,10 @@
+
 import { GoogleGenAI, Chat, FunctionDeclaration, Type, Tool, FunctionCall } from "@google/genai";
 import { getWeather } from "./weatherService";
 
 // Initialize Gemini Client
 const ai = new GoogleGenAI({ apiKey: process.env.NEXT_PUBLIC_GEMINI_API_KEY });
+
 
 // Define the tool
 const weatherTool: FunctionDeclaration = {
@@ -51,87 +53,93 @@ export const initializeChat = () => {
 };
 
 export type StreamCallback = (chunkText: string, done: boolean) => void;
-export type WeatherCallback = (data: any) => void;
+export type ToolCallCallback = (toolCall: FunctionCall) => void;
 
 /**
- * Sends a message to Gemini and handles streaming response + function calling
+ * Helper to process the stream. 
+ * It consumes the full stream to ensure the SDK updates its internal history state.
  */
-export const sendMessageToGemini = async (
+const processStream = async (
+    result: any, 
+    onStream: StreamCallback, 
+    onToolCall: ToolCallCallback
+) => {
+    let functionCallFound: FunctionCall | null = null;
+
+    try {
+        for await (const chunk of result) {
+            const text = chunk.text;
+            if (text) {
+                onStream(text, false);
+            }
+
+            const fc = chunk.functionCalls;
+            if (fc && fc.length > 0) {
+                functionCallFound = fc[0];
+                // Note: We do NOT break here. We must let the stream drain
+                // so the SDK sees the turn as complete and adds it to history.
+            }
+        }
+    } catch (error) {
+        console.error("Stream processing error:", error);
+        throw error;
+    }
+
+    // After stream is fully consumed
+    if (functionCallFound) {
+        onToolCall(functionCallFound);
+    } else {
+        onStream("", true);
+    }
+};
+
+/**
+ * Sends a user message.
+ */
+export const sendUserMessage = async (
   message: string,
   onStream: StreamCallback,
-  onWeatherData?: WeatherCallback
+  onToolCall: ToolCallCallback
 ) => {
   if (!chatSession) initializeChat();
   if (!chatSession) throw new Error("Failed to initialize chat session");
 
   try {
-    // 1. Send the user's message
     const result = await chatSession.sendMessageStream({ message });
-
-    let functionCallFound: FunctionCall | null = null;
-
-    // 2. Process initial stream
-    for await (const chunk of result) {
-        const text = chunk.text;
-        if (text) {
-            onStream(text, false);
-        }
-
-        const fc = chunk.functionCalls;
-        if (fc && fc.length > 0) {
-            functionCallFound = fc[0];
-            break; 
-        }
-    }
-
-    // 3. If a function call was requested
-    if (functionCallFound) {
-       const { name, args, id } = functionCallFound;
-       
-       if (name === "get_current_weather") {
-           const location = (args as any)?.location || "unknown";
-           
-           // Fetch weather data
-           const weatherData = await getWeather(location);
-           
-           if (onWeatherData && weatherData) {
-               onWeatherData(weatherData);
-           }
-
-           const toolResult = weatherData 
-            ? { weather: weatherData } 
-            : { error: "Could not fetch weather for this location. Please check the city name and try again." };
-
-           // 4. Send the tool result back to the model
-           // IMPORTANT: We must include the 'id' so the model matches the response to the call
-           const toolResponseResult = await chatSession.sendMessageStream({
-               message: [{
-                   functionResponse: {
-                       id: id, 
-                       name: name,
-                       response: toolResult 
-                   }
-               }]
-           });
-
-           // 5. Stream the final answer
-           for await (const chunk of toolResponseResult) {
-               const text = chunk.text;
-               if (text) {
-                   onStream(text, false);
-               }
-           }
-       } else {
-         console.warn(`Unknown tool called: ${name}`);
-       }
-    }
-
-    onStream("", true); // Done
-
+    await processStream(result, onStream, onToolCall);
   } catch (error) {
     console.error("Gemini Error:", error);
-    // Reset session so next try gets a fresh state and doesn't get stuck in a 'function call' pending state
     chatSession = null;
     onStream("\n[System]: Sorry, I encountered an error. Please try again.", true);
   }
 };
+
+/**
+ * Sends a tool response (manual confirmation result) back to the model.
+ */
+export const sendToolResponse = async (
+    id: string,
+    name: string,
+    response: any,
+    onStream: StreamCallback,
+    onToolCall: ToolCallCallback
+) => {
+    if (!chatSession) throw new Error("No active chat session");
+
+    try {
+        const result = await chatSession.sendMessageStream({
+            message: [{
+                functionResponse: {
+                    id: id, 
+                    name: name,
+                    response: response 
+                }
+            }]
+        });
+        await processStream(result, onStream, onToolCall);
+    } catch (error) {
+        console.error("Gemini Tool Response Error:", error);
+        chatSession = null;
+        onStream("\n[System]: Sorry, I encountered an error processing the tool response.", true);
+    }
+}
